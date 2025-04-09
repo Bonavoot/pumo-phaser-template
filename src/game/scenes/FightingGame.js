@@ -26,13 +26,14 @@ export class FightingGame extends Scene {
         // Setup game area
         this.cameras.main.setBackgroundColor(0x222222);
 
-        // Add background - a simple fighting arena
-        const background = this.add.rectangle(512, 384, 1024, 768, 0x333333);
+        // Add background - a sumo arena (dohyo)
+        this.add.image(512, 384, "sumo-arena").setScale(1.5);
 
-        // Add floor/platform
+        // Add floor/platform (invisible)
         const floor = this.add
             .rectangle(512, 550, 800, 30, 0x555555)
-            .setStrokeStyle(2, 0x888888);
+            .setStrokeStyle(2, 0x888888)
+            .setAlpha(0);
 
         // Display waiting message
         this.waitingText = this.add
@@ -82,10 +83,11 @@ export class FightingGame extends Scene {
 
         // Set up input controls
         this.keys = {
-            w: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W),
             a: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A),
-            s: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
             d: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
+            space: this.input.keyboard.addKey(
+                Phaser.Input.Keyboard.KeyCodes.SPACE
+            ),
         };
 
         EventBus.emit("current-scene-ready", this);
@@ -136,29 +138,49 @@ export class FightingGame extends Scene {
                 this.opponent.x = moveData.x;
                 this.opponent.y = moveData.y;
 
-                // Handle facing direction
-                if (moveData.facing === "left") {
-                    this.opponent.setFlipX(true);
-                } else {
-                    this.opponent.setFlipX(false);
-                }
+                // Always face the player
+                this.updateFacingDirection();
 
                 // Play animation if opponent is moving
-                const wasMoving = this.opponent.isMoving;
-                this.opponent.isMoving = true;
-
-                if (!wasMoving) {
+                if (moveData.isMoving && !this.opponent.isMoving) {
                     this.opponent.play("player_move");
-                }
-
-                // Set a short timer to stop animation if no updates come
-                if (this.opponent.moveTimer)
-                    clearTimeout(this.opponent.moveTimer);
-                this.opponent.moveTimer = setTimeout(() => {
-                    this.opponent.isMoving = false;
+                    this.opponent.isMoving = true;
+                } else if (!moveData.isMoving && this.opponent.isMoving) {
                     this.opponent.stop();
                     this.opponent.setFrame(0);
-                }, 100);
+                    this.opponent.isMoving = false;
+                }
+            }
+        });
+
+        // Opponent attack
+        this.socket.on("opponentAttack", () => {
+            if (this.opponent) {
+                // Play attack animation
+                this.opponent.play("player_attack");
+
+                // Check if player is close enough to be hit
+                const distance = Phaser.Math.Distance.Between(
+                    this.player.x,
+                    this.player.y,
+                    this.opponent.x,
+                    this.opponent.y
+                );
+
+                if (distance < 150) {
+                    // Determine knockback direction
+                    const direction = this.player.x < this.opponent.x ? -1 : 1;
+
+                    // Apply knockback
+                    this.player.x += direction * 100;
+
+                    // Visual feedback - flash red
+                    this.player.setTint(0xff0000);
+                    this.time.delayedCall(200, () => {
+                        this.player.clearTint();
+                        this.player.setTint(0x0088ff);
+                    });
+                }
             }
         });
 
@@ -185,17 +207,25 @@ export class FightingGame extends Scene {
 
     createFighters(initialState) {
         // Create animations if they don't exist
-        if (!this.anims.exists("player_move")) {
-            this.anims.create({
-                key: "player_move",
-                frames: this.anims.generateFrameNumbers("player", {
-                    start: 0,
-                    end: 13, // Adjust based on your spritesheet
-                }),
-                frameRate: 30,
-                repeat: -1,
-            });
-        }
+        this.anims.create({
+            key: "player_move",
+            frames: this.anims.generateFrameNumbers("player", {
+                start: 0,
+                end: 13,
+            }),
+            frameRate: 24,
+            repeat: -1,
+        });
+
+        this.anims.create({
+            key: "player_attack",
+            frames: this.anims.generateFrameNumbers("slap1", {
+                start: 0,
+                end: 1,
+            }),
+            frameRate: 1,
+            repeat: 0,
+        });
 
         // Determine which player state to use based on player number
         const playerState =
@@ -211,6 +241,8 @@ export class FightingGame extends Scene {
         this.player = this.add.sprite(playerState.x, playerState.y, "player");
         this.player.setFrame(0); // Set initial frame
         this.player.setScale(0.75);
+        this.player.isMoving = false;
+        this.player.isAttacking = false;
 
         // Create the opponent
         this.opponent = this.add.sprite(
@@ -219,21 +251,54 @@ export class FightingGame extends Scene {
             "player"
         );
         this.opponent.setFrame(0);
-        this.opponent.isMoving = false; // Track opponent animation state
+        this.opponent.isMoving = false;
+        this.opponent.isAttacking = false;
         this.opponent.setScale(0.75);
-
-        // Set initial facing direction
-        if (playerState.facing === "left") {
-            this.player.setFlipX(true);
-        }
-
-        if (opponentState.facing === "left") {
-            this.opponent.setFlipX(false);
-        }
 
         // Set player tint to distinguish from opponent
         this.player.setTint(0x0088ff); // Blue tint
         this.opponent.setTint(0xff5500); // Orange tint
+
+        // Initial facing direction
+        this.updateFacingDirection();
+    }
+
+    updateFacingDirection() {
+        if (this.player && this.opponent) {
+            // Simple facing logic - always face each other
+            if (this.player.x < this.opponent.x) {
+                this.player.setFlipX(true);
+                this.opponent.setFlipX(false);
+            } else {
+                this.player.setFlipX(false);
+                this.opponent.setFlipX(true);
+            }
+        }
+    }
+
+    attack() {
+        if (this.player.isAttacking) return;
+
+        this.player.isAttacking = true;
+
+        // Play attack animation
+        this.player.play("player_attack");
+
+        // Send attack to server
+        this.socket.emit("playerAttack", {
+            matchId: this.matchId,
+            playerNumber: this.playerNumber,
+        });
+
+        // Reset after animation completes
+        this.time.delayedCall(100, () => {
+            this.player.isAttacking = false;
+            if (this.player.isMoving) {
+                this.player.play("player_move");
+            } else {
+                this.player.setFrame(0);
+            }
+        });
     }
 
     update() {
@@ -241,56 +306,55 @@ export class FightingGame extends Scene {
 
         // Reset movement
         let dx = 0;
-        let dy = 0;
-        let facing = this.player.flipX ? "left" : "right";
+        let isNowMoving = false;
 
-        // Handle horizontal movement
+        // Allow movement during attack
         if (this.keys.a.isDown) {
             dx = -this.speed;
-            facing = "right";
-            this.player.setFlipX(false);
+            isNowMoving = true;
         } else if (this.keys.d.isDown) {
             dx = this.speed;
-            facing = "left";
-            this.player.setFlipX(true);
-        }
-
-        // Check if player is moving
-        const isNowMoving = dx !== 0 || dy !== 0;
-
-        // Handle animation state changes
-        if (isNowMoving && !this.isMoving) {
-            // Started moving - play animation
-            this.player.play("player_move");
-            this.isMoving = true;
-        } else if (!isNowMoving && this.isMoving) {
-            // Stopped moving - stop animation and show idle frame
-            this.player.stop();
-            this.player.setFrame(0); // Show first frame when idle
-            this.isMoving = false;
+            isNowMoving = true;
         }
 
         // Apply movement (delta time based)
         const dt = this.sys.game.loop.delta / 1000; // Convert to seconds
         this.player.x += dx * dt;
-        this.player.y += dy * dt;
 
-        // Basic boundaries (can be replaced with platform physics in a real fighting game)
-        this.player.x = Phaser.Math.Clamp(this.player.x, 50, 974);
-        this.player.y = Phaser.Math.Clamp(this.player.y, 50, 520); // Above floor
-
-        // Send position update to server if moving or direction changed
-        if (isNowMoving || this.lastFacing !== facing) {
-            this.socket.emit("playerMovement", {
-                matchId: this.matchId,
-                playerNumber: this.playerNumber,
-                x: this.player.x,
-                y: this.player.y,
-                facing: facing,
-            });
-
-            this.lastFacing = facing;
+        // Check if player is moving and update animation accordingly (but don't interrupt attack)
+        if (!this.player.isAttacking) {
+            if (isNowMoving && !this.isMoving) {
+                // Started moving - play animation
+                this.player.play("player_move");
+                this.isMoving = true;
+            } else if (!isNowMoving && this.isMoving) {
+                // Stopped moving - stop animation and show idle frame
+                this.player.stop();
+                this.player.setFrame(0); // Show first frame when idle
+                this.isMoving = false;
+            }
         }
+
+        // Handle attack input
+        if (Phaser.Input.Keyboard.JustDown(this.keys.space)) {
+            this.attack();
+        }
+
+        // Basic boundaries
+        this.player.x = Phaser.Math.Clamp(this.player.x, 50, 974);
+        this.player.y = Phaser.Math.Clamp(this.player.y, 450, 500); // Above floor
+
+        // Always update facing direction
+        this.updateFacingDirection();
+
+        // Send position update to server
+        this.socket.emit("playerMovement", {
+            matchId: this.matchId,
+            playerNumber: this.playerNumber,
+            x: this.player.x,
+            y: this.player.y,
+            isMoving: this.isMoving,
+        });
     }
 
     // Clean up when leaving scene

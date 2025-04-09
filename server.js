@@ -56,13 +56,13 @@ io.on("connection", (socket) => {
                     player1: {
                         id: opponent,
                         x: 200,
-                        y: 400,
+                        y: 450,
                         facing: "right",
                     },
                     player2: {
                         id: socket.id,
                         x: 800,
-                        y: 400,
+                        y: 450,
                         facing: "left",
                     },
                 },
@@ -104,22 +104,40 @@ io.on("connection", (socket) => {
     socket.on("playerMovement", (data) => {
         if (!data || !data.matchId) return;
 
-        const { matchId, playerNumber, x, y, facing } = data;
+        const { matchId, playerNumber, x, y, facing, isMoving } = data;
 
         if (matches[matchId]) {
             const playerKey = playerNumber === 1 ? "player1" : "player2";
             const matchState = matches[matchId].state;
 
+            // Update state
             matchState[playerKey].x = x;
             matchState[playerKey].y = y;
             matchState[playerKey].facing = facing;
 
+            // Forward movement to opponent only
             socket.to(matchId).emit("opponentMoved", {
                 x,
                 y,
                 facing,
-                playerNumber,
+                isMoving,
             });
+        }
+    });
+
+    // Player attack
+    socket.on("playerAttack", (data) => {
+        if (!data || !data.matchId) return;
+
+        const { matchId, playerNumber } = data;
+
+        if (matches[matchId]) {
+            console.log(
+                `Player ${playerNumber} in match ${matchId} is attacking`
+            );
+
+            // Forward attack info to opponent
+            socket.to(matchId).emit("opponentAttack");
         }
     });
 
