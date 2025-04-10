@@ -110,12 +110,18 @@ io.on("connection", (socket) => {
             const playerKey = playerNumber === 1 ? "player1" : "player2";
             const matchState = matches[matchId].state;
 
-            // Update state
+            // Update state with all received properties
             matchState[playerKey].x = x;
             matchState[playerKey].y = y;
-            matchState[playerKey].facing = facing;
 
-            // Forward movement to opponent only
+            if (facing !== undefined) {
+                matchState[playerKey].facing = facing;
+            }
+
+            // Store isMoving state in the match data
+            matchState[playerKey].isMoving = isMoving;
+
+            // Forward complete movement data to opponent
             socket.to(matchId).emit("opponentMoved", {
                 x,
                 y,
