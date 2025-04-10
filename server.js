@@ -147,6 +147,36 @@ io.on("connection", (socket) => {
         }
     });
 
+    socket.on("playerKnockback", (data) => {
+        if (!data || !data.matchId) return;
+
+        const { matchId, playerNumber } = data;
+
+        if (matches[matchId]) {
+            console.log(
+                `Player ${playerNumber} in match ${matchId} is being knocked back`
+            );
+
+            // Forward knockback physics data to opponent
+            socket.to(matchId).emit("opponentKnockback", {
+                velocityX: data.velocityX,
+                velocityY: data.velocityY,
+            });
+        }
+    });
+
+    // Player hit (for visual feedback)
+    socket.on("playerHit", (data) => {
+        if (!data || !data.matchId) return;
+
+        const { matchId } = data;
+
+        if (matches[matchId]) {
+            // Forward hit event to opponent
+            socket.to(matchId).emit("playerHit");
+        }
+    });
+
     // Disconnect
     socket.on("disconnect", () => {
         console.log("Player disconnected:", socket.id);
