@@ -8,7 +8,7 @@ export class FightingGame extends Scene {
         this.player = null;
         this.opponent = null;
         this.keys = null;
-        this.speed = 200;
+        this.speed = 300;
         this.socket = null;
         this.matchId = null;
         this.playerNumber = null;
@@ -19,17 +19,21 @@ export class FightingGame extends Scene {
         // Enhanced knockback physics parameters
         this.knockbackForce = 200;
         this.knockbackDamping = 0.92;
-        this.gravity = 800;
+        this.gravity = 0;
 
         // Performance optimization
         this.lastUpdateTime = 0;
         this.updateInterval = 1000 / 60;
 
-        // Ring boundaries
-        this.ringLeft = 50;
-        this.ringRight = 974;
-        this.ringTop = 450;
-        this.ringBottom = 500;
+        // Fixed world dimensions (these will be the same for all players)
+        this.worldWidth = 1024;
+        this.worldHeight = 768;
+
+        // Ring boundaries will be set in create() based on world dimensions
+        this.ringLeft = 0;
+        this.ringRight = 0;
+        this.ringTop = 0;
+        this.ringBottom = 0;
     }
 
     init(data) {
@@ -39,42 +43,61 @@ export class FightingGame extends Scene {
 
     create() {
         // Setup game area
-        this.cameras.main.setBackgroundColor(0x222222);
+        this.cameras.main.setBackgroundColor(0x1a1a1a);
 
-        // Add background - a sumo arena (dohyo) at full screen size
+        // Set ring boundaries based on world dimensions
+        const margin = 50;
+        this.ringLeft = margin;
+        this.ringRight = this.worldWidth - margin;
+        this.ringTop = this.worldHeight * 0.6;
+        this.ringBottom = this.worldHeight / 2;
 
-        // Get game dimensions - this approach works in all Phaser 3 versions
-        const gameWidth = this.cameras.main.width;
-        const gameHeight = this.cameras.main.height;
-
-        // Create the arena background and center it
+        // Create the arena background
         this.arenaBackground = this.add.image(
-            gameWidth / 2,
-            gameHeight / 2,
+            this.worldWidth / 2,
+            this.worldHeight / 2,
             "sumo-arena"
         );
+        this.arenaBackground.setDisplaySize(this.worldWidth, this.worldHeight);
 
-        // Make the arena fill the entire game screen
-        this.arenaBackground.setDisplaySize(gameWidth, gameHeight);
+        // Add traditional Japanese-style waiting message
+        this.waitingText = this.add
+            .text(
+                this.worldWidth / 2,
+                this.worldHeight / 2,
+                "対戦相手を待っています...",
+                {
+                    fontFamily: "Arial Black",
+                    fontSize: 32,
+                    color: "#ffffff",
+                    align: "center",
+                    stroke: "#000000",
+                    strokeThickness: 4,
+                }
+            )
+            .setOrigin(0.5);
 
-        // Add a resize listener to handle window/screen size changes
+        // Add resize listener
         this.scale.on("resize", this.resizeGame, this);
+
+        // Set up the camera to show the entire world
+        this.cameras.main.setBounds(0, 0, this.worldWidth, this.worldHeight);
+        this.cameras.main.centerOn(this.worldWidth / 2, this.worldHeight / 2);
+
+        // Initial camera setup
+        this.resizeGame();
 
         // Add floor/platform (invisible)
         const floor = this.add
-            .rectangle(512, 550, 800, 30, 0x555555)
+            .rectangle(
+                this.worldWidth / 2,
+                this.worldHeight - 50,
+                800,
+                30,
+                0x555555
+            )
             .setStrokeStyle(2, 0x888888)
             .setAlpha(0);
-
-        // Display waiting message
-        this.waitingText = this.add
-            .text(512, 300, "Finding opponent...", {
-                fontFamily: "Arial Black",
-                fontSize: 32,
-                color: "#ffffff",
-                align: "center",
-            })
-            .setOrigin(0.5);
 
         // Connect to socket server with explicit URL
         this.socket = io(
@@ -90,16 +113,6 @@ export class FightingGame extends Scene {
         // Add connection event handlers
         this.socket.on("connect", () => {
             console.log("Connected to server with ID:", this.socket.id);
-
-            // Add debug text to show connection
-            this.add
-                .text(512, 240, "Connected to server!", {
-                    fontFamily: "Arial",
-                    fontSize: 20,
-                    color: "#00ff00",
-                    align: "center",
-                })
-                .setOrigin(0.5);
 
             // Request to find a match
             this.socket.emit("findMatch");
@@ -129,21 +142,22 @@ export class FightingGame extends Scene {
         EventBus.emit("current-scene-ready", this);
     }
 
-    // Update the resize method
-    resizeGame(gameSize) {
-        if (this.arenaBackground) {
-            // Center the background on resize
-            this.arenaBackground.setPosition(
-                gameSize.width / 2,
-                gameSize.height / 2
-            );
+    resizeGame() {
+        // Get the current game size
+        const width = this.scale.width;
+        const height = this.scale.height;
 
-            // Make it fill the entire game area
-            this.arenaBackground.setDisplaySize(
-                gameSize.width,
-                gameSize.height
-            );
-        }
+        // Calculate the scale factor
+        const scale = Math.min(
+            width / this.worldWidth,
+            height / this.worldHeight
+        );
+
+        // Update camera zoom
+        this.cameras.main.setZoom(scale);
+
+        // Center the camera
+        this.cameras.main.centerOn(this.worldWidth / 2, this.worldHeight / 2);
     }
 
     setupSocketListeners() {
@@ -151,17 +165,6 @@ export class FightingGame extends Scene {
         this.socket.on("waitingForOpponent", () => {
             console.log("Waiting for opponent...");
             this.waitingText.setText("Waiting for an opponent...");
-        });
-
-        // Player got hit - handle the visual feedback for opponent
-        this.socket.on("playerHit", () => {
-            if (!this.opponent) return;
-
-            this.opponent.setTint(0xff0000);
-            this.time.delayedCall(200, () => {
-                this.opponent.clearTint();
-                this.opponent.setTint(0xff5500); // Return to orange tint
-            });
         });
 
         // Match found
@@ -174,26 +177,22 @@ export class FightingGame extends Scene {
             // Remove waiting text
             this.waitingText.destroy();
 
-            // Show match info
-            this.add
-                .text(
-                    512,
-                    50,
-                    `Match Started - You are Player ${this.playerNumber}`,
-                    {
-                        fontFamily: "Arial Black",
-                        fontSize: 24,
-                        color: "#ffffff",
-                        align: "center",
-                    }
-                )
-                .setOrigin(0.5);
-
             // Create player and opponent
             this.createFighters(matchData.initialState);
 
             // Match is ready to play
             this.gameStarted = true;
+        });
+
+        // Player got hit - handle the visual feedback for opponent
+        this.socket.on("playerHit", () => {
+            if (!this.opponent) return;
+
+            this.opponent.setTint(0xff0000);
+            this.time.delayedCall(200, () => {
+                this.opponent.clearTint();
+                this.opponent.setTint(0xff5500); // Return to orange tint
+            });
         });
 
         // Opponent moved - enhanced for precise synchronization
@@ -290,12 +289,17 @@ export class FightingGame extends Scene {
             console.log("Opponent disconnected!");
             // Show disconnection message
             this.add
-                .text(512, 200, "Opponent disconnected!", {
-                    fontFamily: "Arial Black",
-                    fontSize: 32,
-                    color: "#ff0000",
-                    align: "center",
-                })
+                .text(
+                    this.worldWidth / 2,
+                    this.worldHeight / 2,
+                    "Opponent disconnected!",
+                    {
+                        fontFamily: "Arial Black",
+                        fontSize: 32,
+                        color: "#ff0000",
+                        align: "center",
+                    }
+                )
                 .setOrigin(0.5);
 
             // Optional: Return to menu after a delay
@@ -368,7 +372,7 @@ export class FightingGame extends Scene {
                     start: 0,
                     end: 1,
                 }),
-                frameRate: 30, // Increased for faster animation
+                frameRate: 30,
                 repeat: 0,
             });
         }
@@ -384,9 +388,9 @@ export class FightingGame extends Scene {
                 : initialState.player1;
 
         // Create the player
-        this.player = this.add.sprite(playerState.x, playerState.y, "player");
-        this.player.setFrame(0); // Set initial frame
-        this.player.setScale(0.75);
+        this.player = this.add.sprite(playerState.x, this.ringTop, "player");
+        this.player.setScale(0.7);
+        this.player.setFrame(0);
         this.player.isMoving = false;
         this.player.isAttacking = false;
         this.player.isInKnockback = false;
@@ -396,23 +400,17 @@ export class FightingGame extends Scene {
         // Create the opponent
         this.opponent = this.add.sprite(
             opponentState.x,
-            opponentState.y,
+            this.ringTop,
             "player"
         );
+        this.opponent.setScale(0.7);
         this.opponent.setFrame(0);
         this.opponent.isMoving = false;
         this.opponent.isAttacking = false;
         this.opponent.isInKnockback = false;
         this.opponent.knockbackVelocityX = 0;
         this.opponent.knockbackVelocityY = 0;
-        this.opponent.setScale(0.75);
-
-        // Set player tint to distinguish from opponent
-
         this.opponent.setTint(0xff5500); // Orange tint
-
-        // Initial facing direction
-        this.updateFacingDirection();
     }
 
     updateFacingDirection() {
@@ -490,11 +488,10 @@ export class FightingGame extends Scene {
         const currentTime = this.time.now;
         const deltaTime = currentTime - this.lastUpdateTime;
 
-        // Only update if enough time has passed for target FPS
         if (deltaTime < this.updateInterval) return;
         this.lastUpdateTime = currentTime;
 
-        const dt = deltaTime / 1000; // Convert to seconds
+        const dt = deltaTime / 1000;
 
         // Handle knockback physics for both characters
         this.updateKnockbackPhysics(this.player, dt);
@@ -502,11 +499,9 @@ export class FightingGame extends Scene {
 
         // Only process movement input if not in knockback
         if (!this.player.isInKnockback) {
-            // Reset movement
             let dx = 0;
             let isNowMoving = false;
 
-            // Allow movement during attack
             if (this.keys.a.isDown) {
                 dx = -this.speed;
                 isNowMoving = true;
@@ -518,7 +513,10 @@ export class FightingGame extends Scene {
             // Apply movement
             this.player.x += dx * dt;
 
-            // Check if player is moving and update animation accordingly
+            // Keep player on the ground
+            this.player.y = this.ringTop;
+
+            // Update animation
             if (!this.player.isAttacking) {
                 if (isNowMoving && !this.isMoving) {
                     this.player.play("player_move");
@@ -530,7 +528,7 @@ export class FightingGame extends Scene {
                 }
             }
 
-            // Send position update to server every frame
+            // Send position update to server
             this.socket.emit("playerMovement", {
                 matchId: this.matchId,
                 playerNumber: this.playerNumber,
@@ -552,16 +550,11 @@ export class FightingGame extends Scene {
             this.ringLeft,
             this.ringRight
         );
-        this.player.y = Phaser.Math.Clamp(
-            this.player.y,
-            this.ringTop,
-            this.ringBottom
-        );
 
         // Check for ring-out
         this.checkRingOut(this.player);
 
-        // Always update facing direction
+        // Update facing direction
         this.updateFacingDirection();
     }
 
@@ -571,34 +564,18 @@ export class FightingGame extends Scene {
 
         // Apply current velocity
         character.x += character.knockbackVelocityX * dt;
-        character.y += character.knockbackVelocityY * dt;
-
-        // Apply gravity to vertical movement
-        character.knockbackVelocityY += this.gravity * dt;
 
         // Apply damping (slowing down effect)
         character.knockbackVelocityX *= this.knockbackDamping;
+
+        // Keep character on the ground
+        character.y = this.ringTop;
 
         // If velocity is very low, end knockback
         if (Math.abs(character.knockbackVelocityX) < 5) {
             character.isInKnockback = false;
             character.knockbackVelocityX = 0;
             character.knockbackVelocityY = 0;
-
-            // Ensure character is at floor level
-            character.y = this.ringTop;
-
-            // If this was the player, notify server knockback has ended
-            if (character === this.player) {
-                this.socket.emit("playerMovement", {
-                    matchId: this.matchId,
-                    playerNumber: this.playerNumber,
-                    x: character.x,
-                    y: character.y,
-                    facing: character.flipX ? "right" : "left",
-                    isMoving: this.isMoving,
-                });
-            }
         }
 
         // Enforce ring boundaries during knockback
@@ -607,12 +584,6 @@ export class FightingGame extends Scene {
             this.ringLeft,
             this.ringRight
         );
-
-        // If character hits floor, bounce slightly
-        if (character.y > this.ringTop) {
-            character.y = this.ringTop;
-            character.knockbackVelocityY *= -0.2; // Reduced bounce for more realistic feel
-        }
     }
 
     // New method to check for ring-out
@@ -641,3 +612,4 @@ export class FightingGame extends Scene {
         }
     }
 }
+

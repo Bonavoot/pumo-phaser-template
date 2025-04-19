@@ -28,7 +28,12 @@ export class Preloader extends Scene {
 
         this.load.image("logo", "logo.png");
         this.load.image("star", "star.png");
-        this.load.image("sumo-arena", "sumo-arena.png");
+
+        // Load the sumo arena with proper settings
+        this.load.image("sumo-arena", "sumo-arena.png", {
+            width: 1024,
+            height: 768,
+        });
 
         // Load the attack image
         this.load.spritesheet("slap1", "slap1.png", {
