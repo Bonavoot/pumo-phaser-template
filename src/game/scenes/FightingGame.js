@@ -8,7 +8,7 @@ export class FightingGame extends Scene {
         this.player = null;
         this.opponent = null;
         this.keys = null;
-        this.speed = 250;
+        this.speed = 200;
         this.socket = null;
         this.matchId = null;
         this.playerNumber = null;
@@ -16,9 +16,20 @@ export class FightingGame extends Scene {
         this.waitingText = null;
         this.isMoving = false;
 
-        // Knockback physics parameters
-        this.knockbackForce = 300;
-        this.knockbackDamping = 0.9; // Damping factor to slow down knockback
+        // Enhanced knockback physics parameters
+        this.knockbackForce = 200;
+        this.knockbackDamping = 0.92;
+        this.gravity = 800;
+
+        // Performance optimization
+        this.lastUpdateTime = 0;
+        this.updateInterval = 1000 / 60;
+
+        // Ring boundaries
+        this.ringLeft = 50;
+        this.ringRight = 974;
+        this.ringTop = 450;
+        this.ringBottom = 500;
     }
 
     init(data) {
@@ -185,52 +196,35 @@ export class FightingGame extends Scene {
             this.gameStarted = true;
         });
 
-        // Opponent moved
+        // Opponent moved - enhanced for precise synchronization
         this.socket.on("opponentMoved", (moveData) => {
             if (!this.opponent) return;
 
-            // Store previous position to detect actual movement
-            const prevX = this.opponent.x;
+            // Update position with exact coordinates
+            this.opponent.x = moveData.x;
+            this.opponent.y = moveData.y;
 
-            // Update position only if not in knockback - prevents position overrides during knockback
-            if (!this.opponent.isInKnockback) {
-                this.opponent.x = moveData.x;
-                this.opponent.y = moveData.y;
-            }
-
-            // Determine if there was actual movement
-            const hasActuallyMoved = Math.abs(prevX - moveData.x) > 0.1;
-
-            // Update facing direction based on received data or position
+            // Update facing direction
             if (moveData.facing) {
                 this.opponent.setFlipX(
                     moveData.facing === "left" ? false : true
                 );
-            } else {
-                this.updateFacingDirection();
             }
 
-            // Store the opponent's movement state
-            const wasMoving = this.opponent.isMoving;
-            this.opponent.isMoving = moveData.isMoving;
+            // Handle animation state
+            if (this.opponent.isAttacking) return;
 
-            // Handle animation state changes
-            if (this.opponent.isAttacking) {
-                // Don't change animation if attacking
-                return;
-            }
-
-            // If opponent is moving (either by flag or actual position change)
-            if (moveData.isMoving || hasActuallyMoved) {
-                // Only start the animation if it's not already playing
-                if (!wasMoving || !this.opponent.anims.isPlaying) {
+            if (moveData.isMoving) {
+                if (!this.opponent.anims.isPlaying) {
                     this.opponent.play("player_move", true);
                 }
             } else {
-                // Stop movement animation and show idle frame
                 this.opponent.stop();
                 this.opponent.setFrame(0);
             }
+
+            // Check for ring-out
+            this.checkRingOut(this.opponent);
         });
 
         // Opponent attack
@@ -316,6 +310,7 @@ export class FightingGame extends Scene {
     applyKnockback(target, source) {
         // Mark the target as being in knockback
         target.isInKnockback = true;
+        target.lastKnockbackTime = this.time.now; // Track when knockback started
 
         // Calculate direction from source to target
         const angle = Phaser.Math.Angle.Between(
@@ -326,25 +321,28 @@ export class FightingGame extends Scene {
         );
 
         // Initialize or reset velocity properties on the target
-        target.knockbackVelocityX = Math.cos(angle) * this.knockbackForce * 6.5;
+        target.knockbackVelocityX = Math.cos(angle) * this.knockbackForce * 3.5;
         target.knockbackVelocityY = Math.sin(angle) * this.knockbackForce * 0.1; // Less vertical force
 
         // If both objects are at the same position, knock back to the left or right
         if (Math.abs(target.x - source.x) < 10) {
             target.knockbackVelocityX =
-                (target.flipX ? -1 : 1) * this.knockbackForce;
+                (target.flipX ? -1 : 1) * this.knockbackForce * 3.5;
         }
 
         // Add a small upward force for a slight hop effect
         target.knockbackVelocityY = 0;
 
-        // Tell the server about this knockback
+        // Tell the server about this knockback immediately
         if (target === this.player) {
             this.socket.emit("playerKnockback", {
                 matchId: this.matchId,
                 playerNumber: this.playerNumber,
                 velocityX: target.knockbackVelocityX,
                 velocityY: target.knockbackVelocityY,
+                startX: target.x,
+                startY: target.y,
+                timestamp: this.time.now,
             });
         }
     }
@@ -489,12 +487,17 @@ export class FightingGame extends Scene {
     update() {
         if (!this.gameStarted || !this.player) return;
 
-        const dt = this.sys.game.loop.delta / 1000; // Convert to seconds
+        const currentTime = this.time.now;
+        const deltaTime = currentTime - this.lastUpdateTime;
 
-        // Handle knockback physics for player
+        // Only update if enough time has passed for target FPS
+        if (deltaTime < this.updateInterval) return;
+        this.lastUpdateTime = currentTime;
+
+        const dt = deltaTime / 1000; // Convert to seconds
+
+        // Handle knockback physics for both characters
         this.updateKnockbackPhysics(this.player, dt);
-
-        // Handle knockback physics for opponent (for smoother local simulation)
         this.updateKnockbackPhysics(this.opponent, dt);
 
         // Only process movement input if not in knockback
@@ -515,19 +518,27 @@ export class FightingGame extends Scene {
             // Apply movement
             this.player.x += dx * dt;
 
-            // Check if player is moving and update animation accordingly (but don't interrupt attack)
+            // Check if player is moving and update animation accordingly
             if (!this.player.isAttacking) {
                 if (isNowMoving && !this.isMoving) {
-                    // Started moving - play animation
                     this.player.play("player_move");
                     this.isMoving = true;
                 } else if (!isNowMoving && this.isMoving) {
-                    // Stopped moving - stop animation and show idle frame
                     this.player.stop();
-                    this.player.setFrame(0); // Show first frame when idle
+                    this.player.setFrame(0);
                     this.isMoving = false;
                 }
             }
+
+            // Send position update to server every frame
+            this.socket.emit("playerMovement", {
+                matchId: this.matchId,
+                playerNumber: this.playerNumber,
+                x: this.player.x,
+                y: this.player.y,
+                facing: this.player.flipX ? "right" : "left",
+                isMoving: this.isMoving,
+            });
         }
 
         // Handle attack input
@@ -535,27 +546,26 @@ export class FightingGame extends Scene {
             this.attack();
         }
 
-        // Basic boundaries
-        this.player.x = Phaser.Math.Clamp(this.player.x, 50, 974);
-        this.player.y = Phaser.Math.Clamp(this.player.y, 450, 500); // Above floor
+        // Enforce ring boundaries
+        this.player.x = Phaser.Math.Clamp(
+            this.player.x,
+            this.ringLeft,
+            this.ringRight
+        );
+        this.player.y = Phaser.Math.Clamp(
+            this.player.y,
+            this.ringTop,
+            this.ringBottom
+        );
+
+        // Check for ring-out
+        this.checkRingOut(this.player);
 
         // Always update facing direction
         this.updateFacingDirection();
-
-        // Send position update to server (only if not in knockback for consistency)
-        if (!this.player.isInKnockback) {
-            this.socket.emit("playerMovement", {
-                matchId: this.matchId,
-                playerNumber: this.playerNumber,
-                x: this.player.x,
-                y: this.player.y,
-                facing: this.player.flipX ? "right" : "left", // Add facing information
-                isMoving: this.isMoving,
-            });
-        }
     }
 
-    // Method to handle knockback physics
+    // Enhanced knockback physics
     updateKnockbackPhysics(character, dt) {
         if (!character || !character.isInKnockback) return;
 
@@ -564,40 +574,63 @@ export class FightingGame extends Scene {
         character.y += character.knockbackVelocityY * dt;
 
         // Apply gravity to vertical movement
-        character.knockbackVelocityY += 500 * dt; // Gravity effect
+        character.knockbackVelocityY += this.gravity * dt;
 
         // Apply damping (slowing down effect)
         character.knockbackVelocityX *= this.knockbackDamping;
 
         // If velocity is very low, end knockback
-        if (Math.abs(character.knockbackVelocityX) < 10) {
+        if (Math.abs(character.knockbackVelocityX) < 5) {
             character.isInKnockback = false;
             character.knockbackVelocityX = 0;
             character.knockbackVelocityY = 0;
 
             // Ensure character is at floor level
-            character.y = 450; // Reset to floor position
+            character.y = this.ringTop;
 
             // If this was the player, notify server knockback has ended
             if (character === this.player) {
                 this.socket.emit("playerMovement", {
                     matchId: this.matchId,
                     playerNumber: this.playerNumber,
-                    x: this.player.x,
-                    y: this.player.y,
-                    facing: this.player.flipX ? "right" : "left",
+                    x: character.x,
+                    y: character.y,
+                    facing: character.flipX ? "right" : "left",
                     isMoving: this.isMoving,
                 });
             }
         }
 
-        // Enforce boundaries during knockback
-        character.x = Phaser.Math.Clamp(character.x, 50, 974);
+        // Enforce ring boundaries during knockback
+        character.x = Phaser.Math.Clamp(
+            character.x,
+            this.ringLeft,
+            this.ringRight
+        );
 
         // If character hits floor, bounce slightly
-        if (character.y > 450) {
-            character.y = 450;
-            character.knockbackVelocityY *= -0.3; // Bounce with reduced velocity
+        if (character.y > this.ringTop) {
+            character.y = this.ringTop;
+            character.knockbackVelocityY *= -0.2; // Reduced bounce for more realistic feel
+        }
+    }
+
+    // New method to check for ring-out
+    checkRingOut(character) {
+        if (!character) return;
+
+        // Check if character is out of the ring
+        if (character.x < this.ringLeft || character.x > this.ringRight) {
+            // Notify server of ring-out
+            this.socket.emit("ringOut", {
+                matchId: this.matchId,
+                playerNumber:
+                    character === this.player
+                        ? this.playerNumber
+                        : this.playerNumber === 1
+                        ? 2
+                        : 1,
+            });
         }
     }
 
@@ -608,4 +641,3 @@ export class FightingGame extends Scene {
         }
     }
 }
-

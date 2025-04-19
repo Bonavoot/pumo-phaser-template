@@ -36,6 +36,14 @@ app.get("/", (req, res) => {
 const waitingPlayers = [];
 const matches = {};
 
+// Game constants
+const RING_BOUNDARIES = {
+    left: 50,
+    right: 974,
+    top: 450,
+    bottom: 500,
+};
+
 // Socket.io connection handler
 io.on("connection", (socket) => {
     console.log("Player connected:", socket.id);
@@ -49,23 +57,31 @@ io.on("connection", (socket) => {
             const opponent = waitingPlayers.shift();
             const matchId = `match_${Date.now()}`;
 
-            // Create match data
+            // Create match data with initial positions
             matches[matchId] = {
                 players: [socket.id, opponent],
                 state: {
                     player1: {
                         id: opponent,
                         x: 200,
-                        y: 450,
+                        y: RING_BOUNDARIES.top,
                         facing: "right",
+                        isMoving: false,
+                        isInKnockback: false,
+                        score: 0,
                     },
                     player2: {
                         id: socket.id,
                         x: 800,
-                        y: 450,
+                        y: RING_BOUNDARIES.top,
                         facing: "left",
+                        isMoving: false,
+                        isInKnockback: false,
+                        score: 0,
                     },
                 },
+                round: 1,
+                maxRounds: 3,
             };
 
             // Notify both players
@@ -75,6 +91,8 @@ io.on("connection", (socket) => {
                 playerNumber: 1,
                 opponentId: socket.id,
                 initialState: matches[matchId].state,
+                round: 1,
+                maxRounds: 3,
             });
 
             socket.emit("matchFound", {
@@ -83,6 +101,8 @@ io.on("connection", (socket) => {
                 playerNumber: 2,
                 opponentId: opponent,
                 initialState: matches[matchId].state,
+                round: 1,
+                maxRounds: 3,
             });
 
             // Join both players to a room
@@ -113,12 +133,7 @@ io.on("connection", (socket) => {
             // Update state with all received properties
             matchState[playerKey].x = x;
             matchState[playerKey].y = y;
-
-            if (facing !== undefined) {
-                matchState[playerKey].facing = facing;
-            }
-
-            // Store isMoving state in the match data
+            matchState[playerKey].facing = facing;
             matchState[playerKey].isMoving = isMoving;
 
             // Forward complete movement data to opponent
@@ -127,6 +142,59 @@ io.on("connection", (socket) => {
                 y,
                 facing,
                 isMoving,
+            });
+        }
+    });
+
+    // Ring-out detection
+    socket.on("ringOut", (data) => {
+        if (!data || !data.matchId) return;
+
+        const { matchId, playerNumber } = data;
+        const match = matches[matchId];
+        if (!match) return;
+
+        const playerKey = playerNumber === 1 ? "player1" : "player2";
+        const opponentKey = playerNumber === 1 ? "player2" : "player1";
+
+        // Update scores
+        match.state[opponentKey].score += 1;
+
+        // Check if match is over
+        if (match.state[opponentKey].score >= Math.ceil(match.maxRounds / 2)) {
+            // Match over, notify players
+            io.to(matchId).emit("matchOver", {
+                winner: opponentKey,
+                finalScore: {
+                    player1: match.state.player1.score,
+                    player2: match.state.player2.score,
+                },
+            });
+        } else {
+            // Start new round
+            match.round += 1;
+            match.state.player1.x = 200;
+            match.state.player1.y = RING_BOUNDARIES.top;
+            match.state.player2.x = 800;
+            match.state.player2.y = RING_BOUNDARIES.top;
+
+            // Notify players of new round
+            io.to(matchId).emit("newRound", {
+                round: match.round,
+                scores: {
+                    player1: match.state.player1.score,
+                    player2: match.state.player2.score,
+                },
+                positions: {
+                    player1: {
+                        x: match.state.player1.x,
+                        y: match.state.player1.y,
+                    },
+                    player2: {
+                        x: match.state.player2.x,
+                        y: match.state.player2.y,
+                    },
+                },
             });
         }
     });
@@ -147,10 +215,19 @@ io.on("connection", (socket) => {
         }
     });
 
+    // Enhanced knockback physics
     socket.on("playerKnockback", (data) => {
         if (!data || !data.matchId) return;
 
-        const { matchId, playerNumber } = data;
+        const {
+            matchId,
+            playerNumber,
+            velocityX,
+            velocityY,
+            startX,
+            startY,
+            timestamp,
+        } = data;
 
         if (matches[matchId]) {
             console.log(
@@ -159,8 +236,11 @@ io.on("connection", (socket) => {
 
             // Forward knockback physics data to opponent
             socket.to(matchId).emit("opponentKnockback", {
-                velocityX: data.velocityX,
-                velocityY: data.velocityY,
+                velocityX,
+                velocityY,
+                startX,
+                startY,
+                timestamp,
             });
         }
     });
@@ -208,4 +288,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
-
